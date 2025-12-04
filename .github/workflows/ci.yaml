@@ -20,7 +20,7 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: 'maven'
+#           cache: 'maven'  # 暂时注释掉这一行
 
       - name: 3. 构建、测试 Java 应用
         run: mvn clean verify
