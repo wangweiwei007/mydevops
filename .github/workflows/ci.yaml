@@ -1,0 +1,84 @@
+name: CI/CD Pipeline (Java & Jib GitOps)
+
+on:
+  push:
+    branches:
+      - master # 触发主分支
+    paths-ignore:
+      - 'k8s/**' # 忽略配置文件的提交
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. 检出应用代码
+        uses: actions/checkout@v4
+
+      - name: 2. 设置 Java 环境 (JDK 17)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: 3. 构建、测试 Java 应用
+        run: mvn clean verify
+
+      - name: 4. 定义镜像标签和仓库变量
+        id: set_vars
+        run: |
+          # 变量 1：使用 Commit SHA 作为唯一的镜像标签
+          echo "IMAGE_TAG=${{ github.sha }}" >> $GITHUB_ENV
+
+          # 变量 2：阿里云 ACR 域名和命名空间 (不包含镜像仓库名称)
+          echo "ACR_REPO=registry.cn-hangzhou.aliyuncs.com/my-devops-ns" >> $GITHUB_ENV
+
+          # 变量 3：固定的镜像仓库名称 (用于 Step 7 的 sed 替换逻辑)
+          echo "IMAGE_NAME=my-devops-rep" >> $GITHUB_ENV
+
+      - name: 5. 使用 Jib 构建并推送镜像到 ACR
+        env:
+          # 传递 ACR 认证凭证给 Jib
+          DOCKER_USERNAME: ${{ secrets.ACR_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          echo "开始构建镜像: ${{ env.ACR_REPO }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+
+          # 传递 Jib 所需的变量：docker.repo (ACR 路径) 和 image.tag (Commit SHA)
+          mvn compile jib:build \
+            -Ddocker.repo=${{ env.ACR_REPO }} \
+            -Dimage.tag=${{ env.IMAGE_TAG }} \
+            -DsendCredentialsOverHttp=true
+
+      - name: 6. GitOps: 检出 K8s 配置仓库 (k8s-config-repo)
+        uses: actions/checkout@v4
+        with:
+          repository: wangweiwei007/k8s-config-repo
+          token: ${{ secrets.CONFIG_REPO_PAT }}
+          path: k8s-config-repo
+
+      - name: 7. GitOps: 更新 K8s Deployment YAML (最关键的 GitOps 步骤)
+        id: update_yaml
+        run: |
+          CONFIG_FILE="k8s-config-repo/deployment.yaml"
+
+          # 使用 sed 替换逻辑：
+          # 找到 "my-devops-rep:" (IMAGE_NAME) 后面的所有内容，替换为新的 SHA 标签。
+          sed -i "s|${{ env.IMAGE_NAME }}:.*|${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}|g" ${CONFIG_FILE}
+
+          echo "Deployment YAML 已更新为新的镜像标签: ${{ env.IMAGE_TAG }}"
+
+      - name: 8. GitOps: 提交并推送配置更改
+        working-directory: ./k8s-config-repo
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+
+          if ! git diff --quiet ; then
+            git add .
+            git commit -m "chore(ci): Deploy new image ${{ env.IMAGE_TAG }} for ${{ github.sha }}"
+            git push
+          else
+            echo "No changes in K8s config. Skip commit."
+          fi

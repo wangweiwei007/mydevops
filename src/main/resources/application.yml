@@ -1,3 +1,8 @@
-spring
- application
-  name：devops-demo
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
